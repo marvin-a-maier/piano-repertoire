@@ -7,12 +7,13 @@
 <title>Piano Repertoire Keeper</title>
 <style>
   :root {
-    --bg: #faf9f7; --card: #ffffff; --text: #1c1917; --muted: #78716c;
-    --accent: #b45309; --accent-soft: #fef3c7; --border: #e7e5e4;
-    --danger: #b91c1c; --radius: 12px;
+    --bg: #000000; --card: #0a0a0a; --text: #f5f5f5; --muted: #a3a3a3;
+    --accent: #f59e0b; --accent-soft: #26200d; --border: #262626;
+    --danger: #ef4444; --radius: 12px;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     color: var(--text); background: var(--bg);
   }
+  ::-webkit-scrollbar { background: #000; }
   * { box-sizing: border-box; }
   body { margin: 0; min-height: 100vh; padding-bottom: 72px; }
   header { background: var(--card); border-bottom: 1px solid var(--border);
@@ -111,9 +112,17 @@ let currentRating = 0;
 let editingId = null;
 
 /* ---------- persistence ---------- */
+let storageWarned = false;
 function save() {
-  localStorage.setItem(STORE_KEY, JSON.stringify(data));
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(data));
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch (e) {
+    if (!storageWarned) {
+      storageWarned = true;
+      toast("⚠ Browser storage unavailable — data won't persist here. Use the hosted/downloaded version.");
+    }
+  }
   if (settings.autoPush && signedIn()) schedulePush();
 }
 function load() {
@@ -238,15 +247,14 @@ async function findDriveFile() {
 async function pushToDrive(silent) {
   if (!signedIn()) return;
   try {
-    const meta = { name: DRIVE_FILE, mimeType: "application/json", parents: ["appDataFolder"] };
     const existing = await findDriveFile();
     const boundary = "prk" + Date.now();
-    let body = "";
-    if (existing) {
-      body += "--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
-        + JSON.stringify({ name: DRIVE_FILE }) + "\r\n";
-    }
-    body += "--" + boundary + "\r\nContent-Type: application/json\r\n\r\n" + JSON.stringify(data) + "\r\n--" + boundary + "--";
+    // multipart upload: metadata part + content part (both required)
+    const body =
+      "--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" +
+      JSON.stringify(existing ? { name: DRIVE_FILE } : { name: DRIVE_FILE, mimeType: "application/json", parents: ["appDataFolder"] }) + "\r\n" +
+      "--" + boundary + "\r\nContent-Type: application/json\r\n\r\n" + JSON.stringify(data) + "\r\n" +
+      "--" + boundary + "--";
     const url = existing
       ? "https://www.googleapis.com/upload/drive/v3/files/" + existing.id + "?uploadType=multipart"
       : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
@@ -256,9 +264,13 @@ async function pushToDrive(silent) {
       body
     });
     if (r.status === 401) { accessToken = null; throw new Error("Session expired — sign in again."); }
-    if (!r.ok) throw new Error("Upload failed (" + r.status + ")");
+    if (!r.ok) {
+      let detail = r.status;
+      try { const e = await r.json(); detail += " " + (e.error?.message || ""); } catch {}
+      throw new Error("Upload failed (" + detail + ")");
+    }
     if (!silent) toast("Synced to Google Drive ✓");
-  } catch (e) { if (!silent) toast("Sync failed: " + e.message); }
+  } catch (e) { toast("Sync failed: " + e.message); }
 }
 
 async function pullFromDrive() {
