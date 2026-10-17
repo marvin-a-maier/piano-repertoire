@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<meta name="theme-color" content="#1c1917" />
+<meta name="theme-color" content="#000000" />
 <title>Piano Repertoire Keeper</title>
 <style>
   :root {
@@ -29,14 +29,15 @@
   input[type=text], input[type=date], select, textarea {
     width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px;
     font: inherit; background: var(--card); color: var(--text); }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
   textarea { resize: vertical; min-height: 56px; }
   label { font-size: .78rem; color: var(--muted); display: block; margin: 10px 0 4px; }
   button { font: inherit; border: none; border-radius: 8px; padding: 10px 16px; cursor: pointer;
-    background: var(--accent); color: #fff; font-weight: 600; }
+    background: var(--accent); color: #000; font-weight: 600; }
   button.secondary { background: var(--accent-soft); color: var(--accent); }
   button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
   button.danger-text { background: none; color: var(--danger); padding: 4px 8px; font-weight: 400; }
-  button:disabled { opacity: .5; cursor: default; }
+  button:disabled { opacity: .4; cursor: default; }
   .row { display: flex; gap: 8px; align-items: center; }
   .row.wrap { flex-wrap: wrap; }
   .piece { display: flex; justify-content: space-between; align-items: center; gap: 10px;
@@ -50,7 +51,7 @@
   .rating-row { display: flex; justify-content: center; gap: 10px; margin: 18px 0; }
   .rating-row button { font-size: 1.3rem; background: none; border: 1px solid var(--border);
     border-radius: 10px; width: 48px; height: 48px; color: var(--text); }
-  .rating-row button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .rating-row button.on { background: var(--accent); color: #000; border-color: var(--accent); }
   .toast { position: fixed; bottom: 84px; left: 50%; transform: translateX(-50%);
     background: #262626; color: #ffffff; padding: 10px 18px; border-radius: 999px;
     border: 1px solid #404040; font-size: .82rem; opacity: 0; transition: opacity .25s;
@@ -65,11 +66,27 @@
   .hidden { display: none !important; }
   .empty { text-align: center; color: var(--muted); padding: 24px 0; font-size: .9rem; }
   .tag { display: inline-block; background: var(--accent-soft); color: var(--accent);
-    font-size: .68rem; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
+    font-size: .68rem; padding: 2px 8px; border-radius: 999px; font-weight: 600; white-space: nowrap; }
   ul.plain { list-style: none; margin: 0; padding: 0; }
   .settings-block { margin-bottom: 20px; }
   code { background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; font-size: .8em; }
   .sync-state { font-size: .8rem; color: var(--muted); margin-top: 6px; }
+
+  /* WIP section */
+  .wip-item { padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .wip-item:last-child { border-bottom: none; }
+  .wip-stars { display: flex; gap: 6px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
+  .wip-stars button.star-btn { font-size: 1.35rem; background: none; color: var(--muted);
+    padding: 0 2px; border: none; line-height: 1; }
+  .wip-stars button.star-btn.on { color: var(--accent); }
+  .wip-stars .mini-btn { padding: 5px 12px; font-size: .75rem; border-radius: 999px; }
+  .session-banner { display: flex; justify-content: space-between; align-items: center;
+    background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 10px;
+    padding: 10px 12px; margin-bottom: 10px; font-size: .8rem; color: var(--accent); }
+  .session-banner button { padding: 7px 14px; font-size: .8rem; }
+  .wip-controls { display: flex; gap: 6px; }
+  .wip-controls button { padding: 4px 8px; font-size: .75rem; font-weight: 500;
+    background: var(--accent-soft); color: var(--accent); }
 </style>
 </head>
 <body>
@@ -88,29 +105,34 @@
 "use strict";
 /* ============================================================
    Piano Repertoire Keeper
-   - Local-first: all data in localStorage
-   - Optional Google Drive sync (appDataFolder, hidden JSON file)
-   - Weighted randomizer: last self-rating + time since last play
+   - Local-first; optional Google Drive sync (hidden appDataFolder)
+   - Perfected list: weighted randomizer (last rating × recency)
+   - WIP list: decay-mass priority (practice mass M, decay-weighted
+     rating basis, damped tenure), batch session logging
    ============================================================ */
 
 const STORE_KEY = "prk-data-v1";
 const SETTINGS_KEY = "prk-settings-v1";
-const DRIVE_FILE = "piano-repertoire.json"; // hidden appDataFolder file
+const DRIVE_FILE = "piano-repertoire.json";
 const GIS_SRC = "https://accounts.google.com/gsi/client";
 const DRIVE_SCOPES = "https://www.googleapis.com/auth/drive.appdata";
 
 /* ---------- state ---------- */
-let data = { pieces: [] };            // pieces: {id,title,composer,notes,history:[{date,rating}]}
+let data = { pieces: [] };   // piece: {id,title,composer,notes,status,wipSince,perfectedSince,
+                             //        history:[{ts,rating} | {date,rating} (legacy)]}
 let settings = {
   clientId: "",
-  halfLifeDays: 21,   // after this many days, a piece's recency weight doubles
-  scorePower: 1.6,     // how strongly a poor last rating boosts priority
-  autoPush: true       // push to Drive after every change when signed in
+  halfLifeDays: 21,  // perfected randomizer: recency half-life
+  scorePower: 1.6,   // perfected randomizer: rating sensitivity
+  tauDays: 14,       // WIP: decay constant for practice mass & rating basis
+  autoPush: true
 };
 let view = "play";
-let currentPick = null;   // suggested piece during rating flow
+let currentPick = null;
 let currentRating = 0;
 let editingId = null;
+let wipRatings = {};        // pending batch ratings: pieceId -> 1..5
+let wipOrderFrozen = null;   // frozen ordering during a session
 
 /* ---------- persistence ---------- */
 let storageWarned = false;
@@ -130,40 +152,87 @@ function save() {
 function load() {
   try { data = JSON.parse(localStorage.getItem(STORE_KEY)) || { pieces: [] }; } catch { data = { pieces: [] }; }
   try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}); } catch {}
+  data.pieces.forEach(p => { if (!p.status) p.status = "perfected"; });
 }
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
 /* ---------- helpers ---------- */
-function lastSession(p) { return p.history && p.history.length ? p.history[p.history.length - 1] : null; }
-function hasSessions(p) { return p.history && p.history.length > 0; }
-function daysSince(iso) {
-  if (!iso) return null;
-  return Math.max(0, Math.floor((Date.now() - new Date(iso + "T00:00:00").getTime()) / 86400000));
+function sessionTs(s) { return s.ts ? +new Date(s.ts) : +new Date((s.date || "1970-01-01") + "T00:00:00"); }
+function lastSession(p) {
+  if (!p.history || !p.history.length) return null;
+  return p.history.reduce((a, b) => sessionTs(a) >= sessionTs(b) ? a : b);
 }
+function hasSessions(p) { return p.history && p.history.length > 0; }
+function wipPieces() { return data.pieces.filter(p => p.status === "wip"); }
+function perfectedPieces() { return data.pieces.filter(p => p.status !== "wip"); }
+function daysSince(isoTs) {
+  if (!isoTs) return null;
+  return Math.max(0, Math.floor((Date.now() - +new Date(isoTs)) / 86400000));
+}
+function daysSinceMs(ms) { return Math.max(0, Math.floor((Date.now() - ms) / 86400000)); }
 function fmtDays(d) {
   if (d === null) return "never played";
   if (d === 0) return "today";
   if (d === 1) return "yesterday";
   return d + " days ago";
 }
+function fmtSessionDays(s) { return s?.ts ? fmtDays(daysSinceMs(sessionTs(s))) : fmtDays(daysSince(s?.date)); }
+function fmtDateTime(s) {
+  const d = new Date(sessionTs(s));
+  const sameDay = new Date().toDateString() === d.toDateString();
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return sameDay ? "today " + time : d.toLocaleDateString() + " " + time;
+}
 function stars(n) { return n ? "★".repeat(n) + "☆".repeat(5 - n) : "—"; }
 
-/* ---------- weighted randomizer ---------- */
+/* ---------- perfected randomizer ---------- */
 function weightOf(p) {
   const last = lastSession(p);
-  const scoreW = last ? Math.pow(6 - last.rating, settings.scorePower) : 6; // never played = high priority
-  const d = last ? daysSince(last.date) : null;
-  const timeW = d === null ? 2.5 : 1 + d / settings.halfLifeDays; // linear recency growth
+  const scoreW = last ? Math.pow(6 - last.rating, settings.scorePower) : 6;
+  const d = last ? daysSinceMs(sessionTs(last)) : null;
+  const timeW = d === null ? 2.5 : 1 + d / settings.halfLifeDays;
   return scoreW * timeW;
 }
 function pickPiece() {
-  if (!data.pieces.length) return null;
-  const ws = data.pieces.map(p => ({ p, w: weightOf(p) }));
+  const pool = perfectedPieces();
+  if (!pool.length) return null;
+  const ws = pool.map(p => ({ p, w: weightOf(p) }));
   const total = ws.reduce((s, x) => s + x.w, 0);
   let r = Math.random() * total;
   for (const x of ws) { r -= x.w; if (r <= 0) return x.p; }
   return ws[ws.length - 1].p;
 }
+
+/* ---------- WIP urgency ----------
+   M     = Σ e^(−age/τ)                       practice mass
+   basis = Σ r·e^(−age/τ) / M                  decay-weighted rating (★1 if never played)
+   urgency = (1 + 3/(M+1)) × (6−basis)^1.6 × (1 + daysWIP/28)
+---------------------------------- */
+function wipStats(p) {
+  const tau = settings.tauDays * 86400000;
+  const hist = p.history || [];
+  let M = 0, wsum = 0;
+  for (const s of hist) {
+    const age = Math.max(0, Date.now() - sessionTs(s));
+    const w = Math.exp(-age / tau);
+    M += w; wsum += w * s.rating;
+  }
+  const basis = M > 0 ? wsum / M : 1;
+  const neglect = 1 + 3 / (M + 1);
+  return { M, basis, neglect };
+}
+function wipUrgency(p) {
+  const { neglect, basis } = wipStats(p);
+  const tenureDays = p.wipSince ? daysSinceMs(+new Date(p.wipSince)) : 0;
+  return neglect * Math.pow(6 - basis, 1.6) * (1 + tenureDays / 28);
+}
+function sortedWip() {
+  if (wipOrderFrozen && wipRatings && Object.keys(wipRatings).length) return wipOrderFrozen;
+  const s = [...wipPieces()].sort((a, b) => wipUrgency(b) - wipUrgency(a));
+  if (Object.keys(wipRatings).length) wipOrderFrozen = s; else wipOrderFrozen = null;
+  return s;
+}
+function endSessionMode() { wipRatings = {}; wipOrderFrozen = null; }
 
 /* ---------- toast ---------- */
 let toastTimer;
@@ -175,7 +244,7 @@ function toast(msg) {
 }
 
 /* ============================================================
-   Google Drive sync (appDataFolder)
+   Google Drive sync
    ============================================================ */
 let tokenClient = null;
 let accessToken = null;
@@ -214,13 +283,11 @@ async function signIn() {
   } catch (e) { toast(e.message); }
 }
 
-// Silent re-auth on every load: if you're signed into Google in this browser
-// and previously granted access, a fresh token is issued with zero prompts.
 async function trySignInSilently() {
   if (!settings.clientId || accessToken) return;
   try {
     await ensureTokenClient();
-    tokenClient.requestAccessToken({ prompt: "" }); // fails silently if never granted before
+    tokenClient.requestAccessToken({ prompt: "" });
   } catch {}
 }
 
@@ -252,7 +319,6 @@ async function pushToDrive(silent) {
   try {
     const existing = await findDriveFile();
     const boundary = "prk" + Date.now();
-    // multipart upload: metadata part + content part (both required)
     const body =
       "--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" +
       JSON.stringify(existing ? { name: DRIVE_FILE } : { name: DRIVE_FILE, mimeType: "application/json", parents: ["appDataFolder"] }) + "\r\n" +
@@ -285,12 +351,14 @@ async function pullFromDrive() {
     const remote = await r.json();
     if (!remote.pieces) throw new Error("Unexpected file content");
     const remoteNewer =
-      (remote.updatedAt || 0) > (data.updatedAt || 0) ||                        // timestamp wins
-      (remote.pieces.length > data.pieces.length && !data.pieces.some(hasSessions)) || // remote has pieces, local is empty-ish
-      (data.pieces.length === 0 && remote.pieces.length > 0);                  // empty local always loses
-    if (remoteNewer) { data = remote; save(); toast("Loaded data from Drive ✓"); }
-    else { await pushToDrive(true); toast("Local data was newer — pushed to Drive ✓"); }
-    render();
+      (remote.updatedAt || 0) > (data.updatedAt || 0) ||
+      (remote.pieces.length > data.pieces.length && !data.pieces.some(hasSessions)) ||
+      (data.pieces.length === 0 && remote.pieces.length > 0);
+    if (remoteNewer) {
+      data = remote;
+      data.pieces.forEach(p => { if (!p.status) p.status = "perfected"; });
+      save(); render(); toast("Loaded data from Drive ✓");
+    } else { await pushToDrive(true); toast("Local data was newer — pushed to Drive ✓"); render(); }
   } catch (e) { toast("Sync failed: " + e.message); }
 }
 
@@ -302,41 +370,34 @@ function schedulePush() {
 /* ============================================================
    Rendering
    ============================================================ */
-function switchView(v) { view = v; editingId = null; render(); }
+function switchView(v) { view = v; editingId = null; endSessionMode(); render(); }
 
 function renderHeader() {
+  const wipN = wipPieces().length, repN = perfectedPieces().length;
   document.getElementById("hdrSub").textContent =
-    data.pieces.length + (data.pieces.length === 1 ? " piece" : " pieces") + " in repertoire";
+    `${repN} in repertoire · ${wipN} in practice`;
   const hdr = document.getElementById("hdrSync");
-  if (signedIn()) hdr.innerHTML = '<button class="ghost" onclick="pullFromDrive()">Sync ⟳</button>';
-  else hdr.innerHTML = "";
+  hdr.innerHTML = signedIn() ? '<button class="ghost" onclick="pullFromDrive()">Sync ⟳</button>' : "";
 }
 
 function renderNav() {
-  const items = [
-    ["play", "🎲", "Play"],
-    ["list", "🎵", "Repertoire"],
-    ["settings", "⚙️", "Settings"]
-  ];
+  const items = [["play", "🎲", "Play"], ["list", "🎵", "Pieces"], ["settings", "⚙️", "Settings"]];
   document.getElementById("nav").innerHTML = items.map(([v, ico, label]) =>
     `<button class="${view === v ? "active" : ""}" onclick="switchView('${v}')">
        <span class="ico">${ico}</span>${label}</button>`).join("");
 }
 
-/* ----- Play view: randomizer + rating ----- */
+/* ----- Play view ----- */
 function renderPlay() {
   const app = document.getElementById("app");
   if (currentPick) return renderRatingScreen();
+  const wip = sortedWip();
+  const perfs = perfectedPieces();
+  const pending = Object.keys(wipRatings).length;
 
-  if (!data.pieces.length) {
-    app.innerHTML = `<div class="card"><div class="empty">
-      Your repertoire list is empty.<br/>Add pieces you've perfected under <b>Repertoire</b>.</div></div>`;
-    return;
-  }
-  const preview = data.pieces
-    .map(p => ({ p, w: weightOf(p) }))
-    .sort((a, b) => b.w - a.w).slice(0, 3);
   app.innerHTML = `
+    ${wip.length ? renderWipCard(wip, pending) : ""}
+    ${perfs.length ? `
     <div class="card suggest-box">
       <div class="muted">Feeling rusty?</div>
       <div class="big">Roll the dice</div>
@@ -346,17 +407,86 @@ function renderPlay() {
     <div class="card">
       <h3>Highest priority right now</h3>
       <ul class="plain">
-        ${preview.map(({ p, w }) => `
+        ${perfs.map(p => ({ p, w: weightOf(p) })).sort((a, b) => b.w - a.w).slice(0, 3).map(({ p, w }) => `
           <li class="piece">
             <div>
               <div class="title">${esc(p.title)}</div>
-              <div class="meta">${esc(p.composer || "")} · ${fmtDays(daysSince((lastSession(p) || {}).date))} · ${stars(lastSession(p)?.rating)}</div>
+              <div class="meta">${esc(p.composer || "")} · ${fmtSessionDays(lastSession(p))} · ${stars(lastSession(p)?.rating)}</div>
             </div>
             <span class="tag">+${w.toFixed(1)}</span>
           </li>`).join("")}
       </ul>
+    </div>` : (!wip.length ? `<div class="card"><div class="empty">
+      Your repertoire is empty.<br/>Add pieces under <b>Pieces</b>.</div></div>` : "")}`;
+}
+
+function renderWipCard(wip, pending) {
+  return `
+    <div class="card">
+      <h3>🎹 In practice</h3>
+      ${pending ? `
+      <div class="session-banner">
+        <span>Session in progress — order frozen · ${pending} rated</span>
+        <div class="row">
+          <button class="secondary" onclick="clearSession()">Clear</button>
+          <button onclick="logSession()">Log session</button>
+        </div>
+      </div>` : `<div class="muted" style="margin-bottom:6px">Tap stars to rate, then log — order updates after logging</div>`}
+      <ul class="plain">
+        ${wip.map((p, idx) => {
+          const st = wipStats(p);
+          const last = lastSession(p);
+          const r = wipRatings[p.id] || 0;
+          const tenure = p.wipSince ? daysSinceMs(+new Date(p.wipSince)) : 0;
+          return `
+          <li class="wip-item">
+            <div class="piece" style="padding:0;border:none">
+              <div style="flex:1">
+                <div class="title">${esc(p.title)} <span class="tag">#${idx + 1}</span></div>
+                <div class="meta">${esc(p.composer || "")} · ${tenure}d in practice · ${p.history?.length || 0} sessions
+                  · last: ${last ? fmtDateTime(last) + " " + stars(last.rating) : "never"}
+                  · basis ${st.basis.toFixed(1)}★</div>
+              </div>
+              <span class="tag">urg ${wipUrgency(p).toFixed(1)}</span>
+            </div>
+            <div class="wip-stars">
+              ${[1,2,3,4,5].map(n => `<button class="star-btn ${r >= n ? "on" : ""}" onclick="setWipRating('${p.id}',${n})">★</button>`).join("")}
+              ${r ? `<button class="mini-btn" onclick="logOne('${p.id}')">Log</button>
+                     <button class="mini-btn ghost" onclick="setWipRating('${p.id}',0)">✕</button>` : ""}
+            </div>
+          </li>`;
+        }).join("")}
+      </ul>
     </div>`;
 }
+
+function setWipRating(id, n) {
+  if (n === 0) delete wipRatings[id]; else wipRatings[id] = n;
+  if (!wipOrderFrozen) wipOrderFrozen = sortedWip(); // freeze on first rating
+  render();
+}
+function logOne(id) {
+  const r = wipRatings[id];
+  if (!r) return;
+  const p = data.pieces.find(x => x.id === id);
+  if (p) { (p.history = p.history || []).push({ ts: new Date().toISOString(), rating: r }); }
+  delete wipRatings[id];
+  if (!Object.keys(wipRatings).length) endSessionMode();
+  save(); render(); toast("Logged ✓");
+}
+function logSession() {
+  const ids = Object.keys(wipRatings);
+  if (!ids.length) return;
+  const ts = new Date().toISOString();
+  for (const id of ids) {
+    const p = data.pieces.find(x => x.id === id);
+    if (p) (p.history = p.history || []).push({ ts, rating: wipRatings[id] });
+  }
+  const n = ids.length;
+  endSessionMode();
+  save(); render(); toast(`Logged ${n} piece${n > 1 ? "s" : ""} — nice session! 🎹`);
+}
+function clearSession() { endSessionMode(); render(); }
 
 function suggest() {
   currentPick = pickPiece();
@@ -374,7 +504,7 @@ function renderRatingScreen() {
       <div class="big">${esc(p.title)}</div>
       <div class="muted">${esc(p.composer || "")}</div>
       ${p.notes ? `<div class="muted" style="margin-top:8px;font-style:italic">${esc(p.notes)}</div>` : ""}
-      ${last ? `<div class="muted" style="margin-top:8px">Last played ${fmtDays(daysSince(last.date))} · rated ${stars(last.rating)}</div>` : `<div class="muted" style="margin-top:8px">First session back!</div>`}
+      ${last ? `<div class="muted" style="margin-top:8px">Last played ${fmtDateTime(last)} · rated ${stars(last.rating)}</div>` : `<div class="muted" style="margin-top:8px">First session back!</div>`}
       <hr style="border:none;border-top:1px solid var(--border);margin:18px 0" />
       <h3>How did it go?</h3>
       <div class="rating-row">
@@ -396,27 +526,27 @@ function skipPick() { currentPick = null; render(); }
 function saveRating() {
   if (!currentPick || !currentRating) return;
   const p = data.pieces.find(x => x.id === currentPick.id);
-  if (p) {
-    p.history = p.history || [];
-    p.history.push({ date: new Date().toISOString().slice(0, 10), rating: currentRating });
-  }
+  if (p) (p.history = p.history || []).push({ ts: new Date().toISOString(), rating: currentRating });
   currentPick = null; currentRating = 0;
-  save(); render(); toast("Session saved — may the fourth be with you. 🎹");
+  save(); render(); toast("Session saved 🎹");
 }
 
-/* ----- Repertoire list ----- */
+/* ----- Pieces view: WIP + Repertoire ----- */
 function renderList() {
   const app = document.getElementById("app");
-  const sorted = [...data.pieces].sort((a, b) =>
-    (daysSince((lastSession(b) || {}).date) || 9999) - (daysSince((lastSession(a) || {}).date) || 9999));
-
-  const formPiece = editingId
-    ? data.pieces.find(p => p.id === editingId)
-    : null;
+  const formPiece = editingId ? data.pieces.find(p => p.id === editingId) : null;
+  const wip = [...wipPieces()].sort((a, b) => wipUrgency(b) - wipUrgency(a));
+  const reps = [...perfectedPieces()].sort((a, b) =>
+    (daysSinceMs(sessionTs(lastSession(b) || {})) || 9999) - (daysSinceMs(sessionTs(lastSession(a) || {})) || 9999));
 
   app.innerHTML = `
     <div class="card">
       <h3>${editingId ? "Edit piece" : "Add a piece"}</h3>
+      <label>Status</label>
+      <select id="fStatus">
+        <option value="wip" ${formPiece?.status === "wip" ? "selected" : ""}>🎹 In practice (WIP)</option>
+        <option value="perfected" ${editingId && formPiece?.status !== "wip" ? "selected" : ""}>🏆 Perfected repertoire</option>
+      </select>
       <label>Composer</label>
       <input type="text" id="fComposer" placeholder="Chopin" value="${escAttr(formPiece?.composer || "")}">
       <label>Title *</label>
@@ -424,42 +554,65 @@ function renderList() {
       <label>Notes (optional)</label>
       <textarea id="fNotes" placeholder="e.g. struggled with the coda">${esc(formPiece?.notes || "")}</textarea>
       <div class="row" style="margin-top:12px">
-        <button onclick="savePiece()">${editingId ? "Save changes" : "Add to repertoire"}</button>
+        <button onclick="savePiece()">${editingId ? "Save changes" : "Add piece"}</button>
         ${editingId ? '<button class="ghost" onclick="cancelEdit()">Cancel</button>' : ""}
       </div>
     </div>
+
     <div class="card">
-      <h3>Repertoire (${data.pieces.length})</h3>
-      ${sorted.length ? `<ul class="plain">${sorted.map(p => {
-        const last = lastSession(p);
-        return `<li class="piece">
-          <div style="flex:1">
-            <div class="title">${esc(p.title)}</div>
-            <div class="meta">${esc(p.composer || "—")} · ${fmtDays(daysSince(last?.date))} · <span class="stars">${stars(last?.rating)}</span>
-              ${p.history?.length > 1 ? ` · ${p.history.length} sessions` : ""}</div>
-          </div>
-          <div class="row">
-            <button class="danger-text" onclick="editPiece('${p.id}')">✏️</button>
-            <button class="danger-text" onclick="removePiece('${p.id}')">🗑</button>
-          </div>
-        </li>`; }).join("")}</ul>`
-      : `<div class="empty">Nothing here yet — add your first perfected piece above.</div>`}
+      <h3>🎹 In practice (${wip.length})</h3>
+      ${wip.length ? `<ul class="plain">${wip.map(p => pieceRow(p, true)).join("")}</ul>`
+      : `<div class="empty">No pieces in practice. Add one above or send a repertoire piece back for rework.</div>`}
+    </div>
+
+    <div class="card">
+      <h3>🏆 Perfected repertoire (${reps.length})</h3>
+      ${reps.length ? `<ul class="plain">${reps.map(p => pieceRow(p, false)).join("")}</ul>`
+      : `<div class="empty">Nothing here yet — mark a WIP piece as perfected or add directly.</div>`}
     </div>`;
+}
+
+function pieceRow(p, isWip) {
+  const last = lastSession(p);
+  const tenure = isWip && p.wipSince ? ` · ${daysSinceMs(+new Date(p.wipSince))}d in practice` : "";
+  return `<li class="piece">
+    <div style="flex:1">
+      <div class="title">${esc(p.title)}</div>
+      <div class="meta">${esc(p.composer || "—")} · ${fmtSessionDays(last)} · <span class="stars">${stars(last?.rating)}</span>
+        ${p.history?.length > 1 ? ` · ${p.history.length} sessions` : ""}${tenure}</div>
+    </div>
+    <div class="wip-controls">
+      ${isWip
+        ? `<button onclick="markPerfected('${p.id}')">🎓 Done</button>`
+        : `<button onclick="markWip('${p.id}')">↩ Rework</button>`}
+      <button class="danger-text" onclick="editPiece('${p.id}')">✏️</button>
+      <button class="danger-text" onclick="removePiece('${p.id}')">🗑</button>
+    </div>
+  </li>`;
 }
 
 function savePiece() {
   const title = document.getElementById("fTitle").value.trim();
   const composer = document.getElementById("fComposer").value.trim();
   const notes = document.getElementById("fNotes").value.trim();
+  const status = document.getElementById("fStatus").value;
   if (!title) { toast("A title is required."); return; }
   if (editingId) {
     const p = data.pieces.find(x => x.id === editingId);
-    Object.assign(p, { title, composer, notes });
+    const changed = p.status !== status;
+    Object.assign(p, { title, composer, notes, status });
+    if (status === "wip" && changed) p.wipSince = new Date().toISOString();
+    if (status === "perfected" && changed) p.perfectedSince = new Date().toISOString();
   } else {
-    data.pieces.push({ id: uid(), title, composer, notes, history: [] });
+    const nowIso = new Date().toISOString();
+    data.pieces.push({
+      id: uid(), title, composer, notes, status, history: [],
+      wipSince: status === "wip" ? nowIso : null,
+      perfectedSince: status === "perfected" ? nowIso : null
+    });
   }
   editingId = null;
-  save(); render(); toast(editingId ? "Updated." : "Added to repertoire ✓");
+  save(); render(); toast("Saved ✓");
 }
 function editPiece(id) { editingId = id; render(); }
 function cancelEdit() { editingId = null; render(); }
@@ -470,13 +623,30 @@ function removePiece(id) {
     save(); render(); toast("Removed.");
   }
 }
+function markPerfected(id) {
+  const p = data.pieces.find(x => x.id === id);
+  if (!p) return;
+  const last = lastSession(p);
+  p.status = "perfected";
+  p.perfectedSince = new Date().toISOString();
+  delete wipRatings[id];
+  save(); render();
+  toast(`🎓 "${p.title}" perfected! ${last ? "Final rating: " + stars(last.rating) : ""}`);
+}
+function markWip(id) {
+  const p = data.pieces.find(x => x.id === id);
+  if (!p) return;
+  p.status = "wip";
+  p.wipSince = new Date().toISOString(); // tenure restarts
+  save(); render(); toast(`"${p.title}" sent back to practice — clock restarted.`);
+}
 
 /* ----- Settings ----- */
 function renderSettings() {
   document.getElementById("app").innerHTML = `
     <div class="card settings-block">
       <h3>Google Drive sync</h3>
-      <p class="muted">Your repertoire is stored as a hidden JSON file in your own Drive (appDataFolder). Works across devices with the same Google account.</p>
+      <p class="muted">Your repertoire is stored as a hidden JSON file in your own Drive (appDataFolder).</p>
       <label>OAuth Client ID</label>
       <input type="text" id="sClientId" placeholder="xxxxxxxx.apps.googleusercontent.com" value="${escAttr(settings.clientId)}">
       <div class="sync-state">${signedIn()
@@ -496,18 +666,25 @@ function renderSettings() {
           <li>APIs &amp; Services → Library → enable <b>Google Drive API</b>.</li>
           <li>OAuth consent screen → External → add yourself as a test user.</li>
           <li>Credentials → Create credentials → <b>OAuth Client ID</b> → Web application.</li>
-          <li>Add this page's origin (e.g. <code>https://your-name.github.io</code>) under <b>Authorized JavaScript origins</b>.</li>
+          <li>Add this page's origin under <b>Authorized JavaScript origins</b>.</li>
           <li>Copy the Client ID here, and sign in.</li>
         </ol>
       </details>
     </div>
 
     <div class="card settings-block">
-      <h3>Randomizer tuning</h3>
-      <label>Recency half-life: every <b id="hlOut">${settings.halfLifeDays}</b> days unplayed adds one unit of urgency</label>
+      <h3>🎲 Repertoire randomizer</h3>
+      <label>Recency half-life: <b id="hlOut">${settings.halfLifeDays}</b> days unplayed adds one unit of urgency</label>
       <input type="range" id="sHalfLife" min="3" max="60" value="${settings.halfLifeDays}" oninput="document.getElementById('hlOut').textContent=this.value">
-      <label>Rating sensitivity: <b id="spOut">${settings.scorePower}</b> (higher = low ratings get picked much more often)</label>
+      <label>Rating sensitivity: <b id="spOut">${settings.scorePower}</b></label>
       <input type="range" id="sScorePower" min="1" max="3" step="0.1" value="${settings.scorePower}" oninput="document.getElementById('spOut').textContent=this.value">
+    </div>
+
+    <div class="card settings-block">
+      <h3>🎹 In-practice priority</h3>
+      <p class="muted">How fast practice credit fades: a session's weight is e^(−age/τ). Higher τ = more forgiving of gaps.</p>
+      <label>Decay constant τ: <b id="tauOut">${settings.tauDays}</b> days</label>
+      <input type="range" id="sTau" min="7" max="30" value="${settings.tauDays}" oninput="document.getElementById('tauOut').textContent=this.value">
       <div style="margin-top:12px"><button class="secondary" onclick="saveSettings()">Save tuning</button></div>
     </div>
 
@@ -529,7 +706,9 @@ function saveSettings() {
   if (hl) settings.halfLifeDays = +hl.value;
   const sp = document.getElementById("sScorePower");
   if (sp) settings.scorePower = +sp.value;
-  tokenClient = null; // rebuild with new client id
+  const tau = document.getElementById("sTau");
+  if (tau) settings.tauDays = +tau.value;
+  tokenClient = null;
   save(); toast("Settings saved ✓"); render();
 }
 async function saveThenSign() {
@@ -551,7 +730,9 @@ function importJson(ev) {
     try {
       const j = JSON.parse(r.result);
       if (!Array.isArray(j.pieces)) throw new Error();
-      data = j; save(); render(); toast("Imported ✓");
+      data = j;
+      data.pieces.forEach(p => { if (!p.status) p.status = "perfected"; });
+      save(); render(); toast("Imported ✓");
     } catch { toast("Invalid file."); }
   };
   r.readAsText(f);
