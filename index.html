@@ -52,8 +52,9 @@
     border-radius: 10px; width: 48px; height: 48px; color: var(--text); }
   .rating-row button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
   .toast { position: fixed; bottom: 84px; left: 50%; transform: translateX(-50%);
-    background: var(--text); color: #fff; padding: 10px 18px; border-radius: 999px;
-    font-size: .82rem; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 50; }
+    background: #262626; color: #ffffff; padding: 10px 18px; border-radius: 999px;
+    border: 1px solid #404040; font-size: .82rem; opacity: 0; transition: opacity .25s;
+    pointer-events: none; z-index: 50; max-width: 90vw; }
   .toast.show { opacity: 1; }
   nav { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card);
     border-top: 1px solid var(--border); display: flex; z-index: 20; }
@@ -114,6 +115,7 @@ let editingId = null;
 /* ---------- persistence ---------- */
 let storageWarned = false;
 function save() {
+  data.updatedAt = Date.now();
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(data));
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -133,6 +135,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 
 /* ---------- helpers ---------- */
 function lastSession(p) { return p.history && p.history.length ? p.history[p.history.length - 1] : null; }
+function hasSessions(p) { return p.history && p.history.length > 0; }
 function daysSince(iso) {
   if (!iso) return null;
   return Math.max(0, Math.floor((Date.now() - new Date(iso + "T00:00:00").getTime()) / 86400000));
@@ -281,10 +284,11 @@ async function pullFromDrive() {
     const r = await driveCall("drive/v3/files/" + f.id + "?alt=media");
     const remote = await r.json();
     if (!remote.pieces) throw new Error("Unexpected file content");
-    // last-write-wins by most recent history entry / change
-    const remoteLatest = Math.max(0, ...remote.pieces.map(p => +new Date((lastSession(p) || {}).date || 0)));
-    const localLatest = Math.max(0, ...data.pieces.map(p => +new Date((lastSession(p) || {}).date || 0)));
-    if (remoteLatest > localLatest) { data = remote; save(); toast("Loaded data from Drive ✓"); }
+    const remoteNewer =
+      (remote.updatedAt || 0) > (data.updatedAt || 0) ||                        // timestamp wins
+      (remote.pieces.length > data.pieces.length && !data.pieces.some(hasSessions)) || // remote has pieces, local is empty-ish
+      (data.pieces.length === 0 && remote.pieces.length > 0);                  // empty local always loses
+    if (remoteNewer) { data = remote; save(); toast("Loaded data from Drive ✓"); }
     else { await pushToDrive(true); toast("Local data was newer — pushed to Drive ✓"); }
     render();
   } catch (e) { toast("Sync failed: " + e.message); }
