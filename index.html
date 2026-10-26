@@ -55,7 +55,7 @@
   .toast { position: fixed; bottom: 84px; left: 50%; transform: translateX(-50%);
     background: #262626; color: #ffffff; padding: 10px 18px; border-radius: 999px;
     border: 1px solid #404040; font-size: .82rem; opacity: 0; transition: opacity .25s;
-    pointer-events: none; z-index: 50; max-width: 90vw; }
+    pointer-events: none; z-index: 90; max-width: 90vw; text-align: center; }
   .toast.show { opacity: 1; }
   nav { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card);
     border-top: 1px solid var(--border); display: flex; z-index: 20; }
@@ -87,6 +87,35 @@
   .wip-controls { display: flex; gap: 6px; }
   .wip-controls button { padding: 4px 8px; font-size: .75rem; font-weight: 500;
     background: var(--accent-soft); color: var(--accent); }
+  .mini-btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+  .mini-btn { padding: 5px 10px; font-size: .78rem; border-radius: 8px;
+    background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+
+  /* Sheet viewer overlay */
+  #sheetOverlay { position: fixed; inset: 0; background: #000; z-index: 60;
+    display: flex; flex-direction: column; }
+  #sheetBar { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    background: rgba(0,0,0,.85); border-bottom: 1px solid var(--border); z-index: 62; }
+  #sheetBar .title { flex: 1; font-size: .85rem; font-weight: 600; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  #sheetBar button { padding: 8px 12px; font-size: .8rem; }
+  #sheetStage { flex: 1; position: relative; overflow: hidden; touch-action: none; }
+  #sheetCanvas { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); }
+  #sheetTapPrev, #sheetTapNext { position: absolute; top: 0; bottom: 0; width: 30%;
+    z-index: 61; }
+  #sheetTapPrev { left: 0; }
+  #sheetTapNext { right: 0; }
+  #sheetPageHint { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+    background: rgba(38,38,38,.9); border: 1px solid #404040; color: #fff;
+    font-size: .78rem; padding: 6px 14px; border-radius: 999px; pointer-events: none; z-index: 61; }
+  #sheetLoading { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    color: var(--muted); font-size: .9rem; z-index: 61; }
+
+  /* In-sheet rating prompt */
+  #sheetRating { position: fixed; inset: 0; background: rgba(0,0,0,.8); z-index: 70;
+    display: flex; align-items: center; justify-content: center; }
+  #sheetRating .box { background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 24px; text-align: center; max-width: 340px; width: 90%; }
 </style>
 </head>
 <body>
@@ -105,34 +134,47 @@
 "use strict";
 /* ============================================================
    Piano Repertoire Keeper
-   - Local-first; optional Google Drive sync (hidden appDataFolder)
-   - Perfected list: weighted randomizer (last rating × recency)
-   - WIP list: decay-mass priority (practice mass M, decay-weighted
-     rating basis, damped tenure), batch session logging
+   - Local-first; Google Drive sync (hidden appDataFolder) for
+     the repertoire JSON and attached sheet PDFs
+   - Perfected list: weighted randomizer
+   - WIP list: decay-mass priority + batch session logging
+   - Sheet reader: PDF.js viewer with tap zones, swipe and
+     AirTurn (Bluetooth page-turn) keyboard input; rating
+     prompt after the last page
    ============================================================ */
 
 const STORE_KEY = "prk-data-v1";
 const SETTINGS_KEY = "prk-settings-v1";
+const SESSION_KEY = "prk-session-v1";
 const DRIVE_FILE = "piano-repertoire.json";
 const GIS_SRC = "https://accounts.google.com/gsi/client";
 const DRIVE_SCOPES = "https://www.googleapis.com/auth/drive.appdata";
+const PDFJS_VER = "3.11.174";
+const PDFJS_SRC = "https://cdn.jsdelivr.net/npm/pdfjs-dist@" + PDFJS_VER + "/build/pdf.min.js";
+const PDFJS_WORKER = "https://cdn.jsdelivr.net/npm/pdfjs-dist@" + PDFJS_VER + "/build/pdf.worker.min.js";
 
 /* ---------- state ---------- */
 let data = { pieces: [] };   // piece: {id,title,composer,notes,status,wipSince,perfectedSince,
-                             //        history:[{ts,rating} | {date,rating} (legacy)]}
+                             //        sheet:{driveId,name}|null, history:[...]}
 let settings = {
   clientId: "",
-  halfLifeDays: 21,  // perfected randomizer: recency half-life
-  scorePower: 1.6,   // perfected randomizer: rating sensitivity
-  tauDays: 14,       // WIP: decay constant for practice mass & rating basis
+  halfLifeDays: 21,
+  scorePower: 1.6,
+  tauDays: 14,
   autoPush: true
 };
 let view = "play";
 let currentPick = null;
 let currentRating = 0;
+let ratingOrigin = "play";
 let editingId = null;
-let wipRatings = {};        // pending batch ratings: pieceId -> 1..5
-let wipOrderFrozen = null;   // frozen ordering during a session
+let wipRatings = {};
+let wipOrderFrozen = null;
+let uploadBusy = false;
+
+/* sheet viewer state */
+let sheet = null;   // { pieceId, pdf, page, numPages, zoom, rendering }
+let sheetRatingValue = 0;
 
 /* ---------- persistence ---------- */
 let storageWarned = false;
@@ -144,7 +186,7 @@ function save() {
   } catch (e) {
     if (!storageWarned) {
       storageWarned = true;
-      toast("⚠ Browser storage unavailable — data won't persist here. Use the hosted/downloaded version.");
+      toast("⚠ Browser storage unavailable — data won't persist here.");
     }
   }
   if (settings.autoPush && signedIn()) schedulePush();
@@ -153,6 +195,28 @@ function load() {
   try { data = JSON.parse(localStorage.getItem(STORE_KEY)) || { pieces: [] }; } catch { data = { pieces: [] }; }
   try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}); } catch {}
   data.pieces.forEach(p => { if (!p.status) p.status = "perfected"; });
+  try {
+    const pend = JSON.parse(localStorage.getItem(SESSION_KEY));
+    if (pend?.ratings) {
+      wipRatings = pend.ratings;
+      wipOrderFrozen = (pend.orderIds || [])
+        .map(id => data.pieces.find(p => p.id === id))
+        .filter(Boolean);
+      if (pend.diceId) currentPick = data.pieces.find(p => p.id === pend.diceId) || null;
+      currentRating = pend.diceRating || 0;
+    }
+  } catch {}
+}
+function savePendingSession() {
+  try {
+    if (!Object.keys(wipRatings).length && !currentPick) { localStorage.removeItem(SESSION_KEY); return; }
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      ratings: wipRatings,
+      orderIds: (wipOrderFrozen || []).map(p => p.id),
+      diceId: currentPick?.id || null,
+      diceRating: currentRating
+    }));
+  } catch {}
 }
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
@@ -165,10 +229,6 @@ function lastSession(p) {
 function hasSessions(p) { return p.history && p.history.length > 0; }
 function wipPieces() { return data.pieces.filter(p => p.status === "wip"); }
 function perfectedPieces() { return data.pieces.filter(p => p.status !== "wip"); }
-function daysSince(isoTs) {
-  if (!isoTs) return null;
-  return Math.max(0, Math.floor((Date.now() - +new Date(isoTs)) / 86400000));
-}
 function daysSinceMs(ms) { return Math.max(0, Math.floor((Date.now() - ms) / 86400000)); }
 function fmtDays(d) {
   if (d === null) return "never played";
@@ -203,11 +263,7 @@ function pickPiece() {
   return ws[ws.length - 1].p;
 }
 
-/* ---------- WIP urgency ----------
-   M     = Σ e^(−age/τ)                       practice mass
-   basis = Σ r·e^(−age/τ) / M                  decay-weighted rating (★1 if never played)
-   urgency = (1 + 3/(M+1)) × (6−basis)^1.6 × (1 + daysWIP/28)
----------------------------------- */
+/* ---------- WIP urgency ---------- */
 function wipStats(p) {
   const tau = settings.tauDays * 86400000;
   const hist = p.history || [];
@@ -227,20 +283,20 @@ function wipUrgency(p) {
   return neglect * Math.pow(6 - basis, 1.6) * (1 + tenureDays / 28);
 }
 function sortedWip() {
-  if (wipOrderFrozen && wipRatings && Object.keys(wipRatings).length) return wipOrderFrozen;
+  if (wipOrderFrozen && Object.keys(wipRatings).length) return wipOrderFrozen;
   const s = [...wipPieces()].sort((a, b) => wipUrgency(b) - wipUrgency(a));
-  if (Object.keys(wipRatings).length) wipOrderFrozen = s; else wipOrderFrozen = null;
+  wipOrderFrozen = Object.keys(wipRatings).length ? s : null;
   return s;
 }
-function endSessionMode() { wipRatings = {}; wipOrderFrozen = null; }
+function endSessionMode() { wipRatings = {}; wipOrderFrozen = null; savePendingSession(); }
 
 /* ---------- toast ---------- */
 let toastTimer;
-function toast(msg) {
+function toast(msg, longMs) {
   const t = document.getElementById("toast");
   t.textContent = msg; t.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+  toastTimer = setTimeout(() => t.classList.remove("show"), longMs || 2600);
 }
 
 /* ============================================================
@@ -368,6 +424,269 @@ function schedulePush() {
 }
 
 /* ============================================================
+   Sheet storage (Drive appDataFolder, one PDF per piece)
+   ============================================================ */
+async function uploadSheet(pieceId, file) {
+  if (!signedIn()) { toast("Sign in with Google first — sheets live in your Drive."); return; }
+  if (uploadBusy) { toast("An upload is already running."); return; }
+  uploadBusy = true;
+  const p = data.pieces.find(x => x.id === pieceId);
+  if (!p) { uploadBusy = false; return; }
+  toast("Uploading sheet…", 30000);
+  try {
+    const oldSheet = p.sheet || null;
+    // resumable upload (handles big PDFs)
+    const meta = { name: "sheet-" + pieceId + ".pdf", mimeType: "application/pdf", parents: ["appDataFolder"] };
+    const init = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + accessToken,
+        "Content-Type": "application/json; charset=UTF-8",
+        "X-Upload-Content-Type": "application/pdf",
+        "X-Upload-Content-Length": String(file.size)
+      },
+      body: JSON.stringify(meta)
+    });
+    if (init.status === 401) { accessToken = null; throw new Error("Session expired — sign in again."); }
+    if (!init.ok) throw new Error("Upload init failed (" + init.status + ")");
+    const loc = init.headers.get("Location");
+    if (!loc) throw new Error("No upload session URL returned");
+    const up = await fetch(loc, {
+      method: "PUT",
+      headers: { "Content-Type": "application/pdf", "Content-Length": String(file.size) },
+      body: file
+    });
+    if (!up.ok) throw new Error("Upload failed (" + up.status + ")");
+    const fin = await up.json();
+    p.sheet = { driveId: fin.id, name: file.name };
+    if (oldSheet?.driveId && oldSheet.driveId !== fin.id) {
+      try { await driveCall("drive/v3/files/" + oldSheet.driveId, { method: "DELETE" }); } catch {}
+    }
+    save(); render();
+    toast("Sheet attached to \"" + p.title + "\" ✓");
+  } catch (e) {
+    toast("Sheet upload failed: " + e.message);
+  } finally { uploadBusy = false; }
+}
+
+async function removeSheet(pieceId) {
+  const p = data.pieces.find(x => x.id === pieceId);
+  if (!p?.sheet) return;
+  const driveId = p.sheet.driveId;
+  const name = p.title;
+  if (!confirm(`Remove the attached sheet from "${name}"? (Play history is kept.)`)) return;
+  p.sheet = null;
+  save(); render();
+  toast("Sheet removed from \"" + name + "\"");
+  dropSheetFromCache(driveId);
+  if (signedIn() && driveId) {
+    try { await driveCall("drive/v3/files/" + driveId, { method: "DELETE" }); } catch {}
+  }
+}
+
+function triggerAttach(pieceId) {
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = "application/pdf";
+  inp.onchange = () => { if (inp.files?.[0]) uploadSheet(pieceId, inp.files[0]); };
+  inp.click();
+}
+
+/* ---------- PDF.js viewer ---------- */
+const SHEET_CACHE = "prk-sheets-v1";
+async function sheetFromCache(driveId) {
+  try {
+    const cache = await caches.open(SHEET_CACHE);
+    const hit = await cache.match(driveId);
+    if (hit) return await hit.arrayBuffer();
+  } catch {}
+  return null;
+}
+async function cacheSheet(driveId, buf) {
+  try {
+    const cache = await caches.open(SHEET_CACHE);
+    await cache.put(driveId, new Response(buf, { headers: { "Content-Type": "application/pdf" } }));
+  } catch {}
+}
+async function dropSheetFromCache(driveId) {
+  try { (await caches.open(SHEET_CACHE)).delete(driveId); } catch {}
+}
+
+function loadPdfJs() {
+  return new Promise((res, rej) => {
+    if (window.pdfjsLib) return res();
+    const s = document.createElement("script");
+    s.src = PDFJS_SRC; s.async = true;
+    s.onload = () => {
+      try { pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER; res(); }
+      catch (e) { rej(e); }
+    };
+    s.onerror = () => rej(new Error("Could not load the PDF library (needs internet)."));
+    document.head.appendChild(s);
+  });
+}
+
+async function openSheet(pieceId) {
+  const p = data.pieces.find(x => x.id === pieceId);
+  if (!p?.sheet) { triggerAttach(pieceId); return; }
+  if (!signedIn()) { toast("Sign in with Google first — sheets live in your Drive."); return; }
+  toast("Opening sheet…", 8000);
+  try {
+    await loadPdfJs();
+    let buf = await sheetFromCache(p.sheet.driveId);
+    if (!buf) {
+      const r = await driveCall("drive/v3/files/" + p.sheet.driveId + "?alt=media");
+      buf = await r.arrayBuffer();
+      cacheSheet(p.sheet.driveId, buf);   // offline from now on
+    }
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    sheet = { pieceId, pdf, page: 1, numPages: pdf.numPages, zoom: 1 };
+    sheetRatingValue = 0;
+    renderSheetOverlay();
+  } catch (e) {
+    toast("Could not open sheet: " + e.message);
+  }
+}
+
+function renderSheetOverlay() {
+  let ov = document.getElementById("sheetOverlay");
+  if (!ov) {
+    ov = document.createElement("div");
+    ov.id = "sheetOverlay";
+    ov.innerHTML = `
+      <div id="sheetBar">
+        <button class="ghost" onclick="sheetNav(-99)">‹‹</button>
+        <button class="ghost" onclick="zoom(-1)">−</button>
+        <div class="title" id="sheetTitle"></div>
+        <button class="ghost" onclick="zoom(1)">+</button>
+        <button class="ghost" title="Remove sheet" onclick="removeSheet(sheet.pieceId);closeSheet()">🗑</button>
+        <button class="ghost" onclick="closeSheet()">✕</button>
+      </div>
+      <div id="sheetStage">
+        <div id="sheetTapPrev" onclick="sheetNav(-1)"></div>
+        <div id="sheetTapNext" onclick="sheetNav(1)"></div>
+        <canvas id="sheetCanvas"></canvas>
+        <div id="sheetPageHint"></div>
+        <div id="sheetLoading">Loading…</div>
+      </div>`;
+    document.body.appendChild(ov);
+    // swipe support
+    const stage = ov.querySelector("#sheetStage");
+    let sx = null, sy = null;
+    stage.addEventListener("touchstart", e => { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }, { passive: true });
+    stage.addEventListener("touchend", e => {
+      if (sx === null) return;
+      const dx = e.changedTouches[0].clientX - sx;
+      const dy = e.changedTouches[0].clientY - sy;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) sheetNav(dx < 0 ? 1 : -1);
+      sx = null;
+    }, { passive: true });
+    // AirTurn Duo & keyboard page turns
+    window.addEventListener("keydown", e => {
+      if (!sheet) return;
+      if (["ArrowRight", "PageDown"].includes(e.key)) { e.preventDefault(); sheetNav(1); }
+      else if (["ArrowLeft", "PageUp"].includes(e.key)) { e.preventDefault(); sheetNav(-1); }
+    });
+  }
+  const p = data.pieces.find(x => x.id === sheet.pieceId);
+  ov.style.display = "flex";
+  document.getElementById("sheetTitle").textContent = p ? p.title : "";
+  drawSheetPage();
+}
+
+async function drawSheetPage() {
+  if (!sheet) return;
+  const stage = document.getElementById("sheetStage");
+  const canvas = document.getElementById("sheetCanvas");
+  const loading = document.getElementById("sheetLoading");
+  const hint = document.getElementById("sheetPageHint");
+  hint.textContent = sheet.page + " / " + sheet.numPages + (sheet.page === sheet.numPages ? " · tap/rate →" : "");
+  loading.style.display = "block";
+  try {
+    const page = await sheet.pdf.getPage(sheet.page);
+    const availW = stage.clientWidth, availH = stage.clientHeight;
+    const base = page.getViewport({ scale: 1 });
+    const fit = Math.min(availW / base.width, availH / base.height);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const scale = fit * sheet.zoom;
+    const vp = page.getViewport({ scale });
+    canvas.width = vp.width * dpr; canvas.height = vp.height * dpr;
+    canvas.style.width = vp.width + "px"; canvas.style.height = vp.height + "px";
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp, transform: [dpr, 0, 0, dpr, 0, 0] }).promise;
+  } catch (e) {
+    toast("Render error: " + e.message);
+  }
+  loading.style.display = "none";
+}
+
+function sheetNav(dir) {
+  if (!sheet) return;
+  const next = sheet.page + dir;
+  if (next < 1) { sheet.page = 1; drawSheetPage(); return; }
+  if (next > sheet.numPages) { openSheetRating(); return; }  // forward on last page → rating
+  sheet.page = next;
+  drawSheetPage();
+}
+
+function zoom(dir) {
+  if (!sheet) return;
+  sheet.zoom = Math.min(3, Math.max(0.6, sheet.zoom + dir * 0.15));
+  drawSheetPage();
+}
+
+function closeSheet() {
+  const ov = document.getElementById("sheetOverlay");
+  if (ov) ov.style.display = "none";
+  sheet = null;
+  const sr = document.getElementById("sheetRating");
+  if (sr) sr.remove();
+}
+
+/* in-sheet rating prompt (after last page) */
+function openSheetRating() {
+  if (!sheet) return;
+  sheetRatingValue = 0;
+  let sr = document.getElementById("sheetRating");
+  if (!sr) {
+    sr = document.createElement("div");
+    sr.id = "sheetRating";
+    sr.innerHTML = `<div class="box">
+      <h3>How did it go?</h3>
+      <div class="rating-row" id="sheetRatingStars"></div>
+      <div class="muted" id="sheetRatingLabel" style="margin-bottom:12px">Tap the stars</div>
+      <div class="row" style="justify-content:center">
+        <button class="secondary" onclick="document.getElementById('sheetRating').remove()">Back to sheet</button>
+        <button id="sheetRatingSave" onclick="submitSheetRating()" disabled>Log</button>
+      </div>
+    </div>`;
+    document.body.appendChild(sr);
+  }
+  sr.style.display = "flex";
+  drawSheetStars();
+}
+function drawSheetStars() {
+  const row = document.getElementById("sheetRatingStars");
+  if (!row) return;
+  row.innerHTML = [1,2,3,4,5].map(n =>
+    `<button class="${sheetRatingValue >= n ? "on" : ""}" onclick="setSheetRating(${n})">★</button>`).join("");
+  document.getElementById("sheetRatingLabel").textContent =
+    sheetRatingValue === 0 ? "Tap the stars" :
+    ["","Rough — needs serious work","Shaky, quite rusty","Okay with slips","Solid, minor slips","Near performance level"][sheetRatingValue];
+  document.getElementById("sheetRatingSave").disabled = !sheetRatingValue;
+}
+function setSheetRating(n) { sheetRatingValue = n; drawSheetStars(); }
+function submitSheetRating() {
+  if (!sheet || !sheetRatingValue) return;
+  const p = data.pieces.find(x => x.id === sheet.pieceId);
+  if (p) (p.history = p.history || []).push({ ts: new Date().toISOString(), rating: sheetRatingValue });
+  delete wipRatings[sheet.pieceId];   // avoids double-logging if it also had pending stars
+  if (!Object.keys(wipRatings).length && !currentPick) { wipOrderFrozen = null; }
+  savePendingSession();
+  closeSheet();
+  save(); render();
+  toast("Logged — nicely played! 🎹");
+}
+
+/* ============================================================
    Rendering
    ============================================================ */
 function switchView(v) { view = v; editingId = null; endSessionMode(); render(); }
@@ -376,8 +695,8 @@ function renderHeader() {
   const wipN = wipPieces().length, repN = perfectedPieces().length;
   document.getElementById("hdrSub").textContent =
     `${repN} in repertoire · ${wipN} in practice`;
-  const hdr = document.getElementById("hdrSync");
-  hdr.innerHTML = signedIn() ? '<button class="ghost" onclick="pullFromDrive()">Sync ⟳</button>' : "";
+  document.getElementById("hdrSync").innerHTML =
+    signedIn() ? '<button class="ghost" onclick="pullFromDrive()">Sync ⟳</button>' : "";
 }
 
 function renderNav() {
@@ -413,11 +732,20 @@ function renderPlay() {
               <div class="title">${esc(p.title)}</div>
               <div class="meta">${esc(p.composer || "")} · ${fmtSessionDays(lastSession(p))} · ${stars(lastSession(p)?.rating)}</div>
             </div>
-            <span class="tag">+${w.toFixed(1)}</span>
+            <div class="row">
+              ${sheetBtn(p)}
+              <span class="tag">+${w.toFixed(1)}</span>
+            </div>
           </li>`).join("")}
       </ul>
     </div>` : (!wip.length ? `<div class="card"><div class="empty">
       Your repertoire is empty.<br/>Add pieces under <b>Pieces</b>.</div></div>` : "")}`;
+}
+
+function sheetBtn(p) {
+  return p.sheet
+    ? `<button class="mini-btn" title="Open sheet" onclick="openSheet('${p.id}')">📄</button>`
+    : `<button class="mini-btn ghost" title="Attach sheet" onclick="triggerAttach('${p.id}')">📄+</button>`;
 }
 
 function renderWipCard(wip, pending) {
@@ -447,7 +775,7 @@ function renderWipCard(wip, pending) {
                   · last: ${last ? fmtDateTime(last) + " " + stars(last.rating) : "never"}
                   · basis ${st.basis.toFixed(1)}★</div>
               </div>
-              <span class="tag">urg ${wipUrgency(p).toFixed(1)}</span>
+              <div class="row">${sheetBtn(p)}<span class="tag">urg ${wipUrgency(p).toFixed(1)}</span></div>
             </div>
             <div class="wip-stars">
               ${[1,2,3,4,5].map(n => `<button class="star-btn ${r >= n ? "on" : ""}" onclick="setWipRating('${p.id}',${n})">★</button>`).join("")}
@@ -462,8 +790,8 @@ function renderWipCard(wip, pending) {
 
 function setWipRating(id, n) {
   if (n === 0) delete wipRatings[id]; else wipRatings[id] = n;
-  if (!wipOrderFrozen) wipOrderFrozen = sortedWip(); // freeze on first rating
-  render();
+  if (Object.keys(wipRatings).length && !wipOrderFrozen) wipOrderFrozen = sortedWip();
+  savePendingSession(); render();
 }
 function logOne(id) {
   const r = wipRatings[id];
@@ -471,7 +799,7 @@ function logOne(id) {
   const p = data.pieces.find(x => x.id === id);
   if (p) { (p.history = p.history || []).push({ ts: new Date().toISOString(), rating: r }); }
   delete wipRatings[id];
-  if (!Object.keys(wipRatings).length) endSessionMode();
+  if (!Object.keys(wipRatings).length) { wipOrderFrozen = null; savePendingSession(); }
   save(); render(); toast("Logged ✓");
 }
 function logSession() {
@@ -483,16 +811,24 @@ function logSession() {
     if (p) (p.history = p.history || []).push({ ts, rating: wipRatings[id] });
   }
   const n = ids.length;
-  endSessionMode();
+  wipRatings = {}; wipOrderFrozen = null; savePendingSession();
   save(); render(); toast(`Logged ${n} piece${n > 1 ? "s" : ""} — nice session! 🎹`);
 }
-function clearSession() { endSessionMode(); render(); }
+function clearSession() { wipRatings = {}; wipOrderFrozen = null; savePendingSession(); render(); }
 
 function suggest() {
   currentPick = pickPiece();
   if (!currentPick) return;
   currentRating = 0;
-  render();
+  ratingOrigin = "play";
+  savePendingSession(); render();
+}
+
+function openRatingFor(piece, origin) {
+  currentPick = piece;
+  currentRating = 0;
+  ratingOrigin = origin;
+  savePendingSession(); render();
 }
 
 function renderRatingScreen() {
@@ -505,6 +841,9 @@ function renderRatingScreen() {
       <div class="muted">${esc(p.composer || "")}</div>
       ${p.notes ? `<div class="muted" style="margin-top:8px;font-style:italic">${esc(p.notes)}</div>` : ""}
       ${last ? `<div class="muted" style="margin-top:8px">Last played ${fmtDateTime(last)} · rated ${stars(last.rating)}</div>` : `<div class="muted" style="margin-top:8px">First session back!</div>`}
+      <div class="row" style="justify-content:center;margin:14px 0 0">
+        ${sheetBtn(p)}
+      </div>
       <hr style="border:none;border-top:1px solid var(--border);margin:18px 0" />
       <h3>How did it go?</h3>
       <div class="rating-row">
@@ -521,14 +860,18 @@ function renderRatingScreen() {
     </div>`;
 }
 
-function setRating(n) { currentRating = n; render(); }
-function skipPick() { currentPick = null; render(); }
+function setRating(n) { currentRating = n; savePendingSession(); render(); }
+function skipPick() { currentPick = null; savePendingSession(); render(); }
 function saveRating() {
   if (!currentPick || !currentRating) return;
   const p = data.pieces.find(x => x.id === currentPick.id);
   if (p) (p.history = p.history || []).push({ ts: new Date().toISOString(), rating: currentRating });
-  currentPick = null; currentRating = 0;
-  save(); render(); toast("Session saved 🎹");
+  const origin = ratingOrigin;
+  currentPick = null; currentRating = 0; ratingOrigin = "play";
+  savePendingSession();
+  save();
+  if (origin === "play") render(); else switchView(origin);
+  toast("Session saved 🎹");
 }
 
 /* ----- Pieces view: WIP + Repertoire ----- */
@@ -575,6 +918,10 @@ function renderList() {
 function pieceRow(p, isWip) {
   const last = lastSession(p);
   const tenure = isWip && p.wipSince ? ` · ${daysSinceMs(+new Date(p.wipSince))}d in practice` : "";
+  const transfer = isWip
+    ? `<button onclick="markPerfected('${p.id}')">🎓</button>`
+    : `<button onclick="markWip('${p.id}')">↩</button>`;
+  const playBtn = `<button title="Play & rate" onclick='openRatingFor(data.pieces.find(x=>x.id==="${p.id}"), "list")'>▶</button>`;
   return `<li class="piece">
     <div style="flex:1">
       <div class="title">${esc(p.title)}</div>
@@ -582,9 +929,9 @@ function pieceRow(p, isWip) {
         ${p.history?.length > 1 ? ` · ${p.history.length} sessions` : ""}${tenure}</div>
     </div>
     <div class="wip-controls">
-      ${isWip
-        ? `<button onclick="markPerfected('${p.id}')">🎓 Done</button>`
-        : `<button onclick="markWip('${p.id}')">↩ Rework</button>`}
+      ${sheetBtn(p)}
+      ${playBtn}
+      ${transfer}
       <button class="danger-text" onclick="editPiece('${p.id}')">✏️</button>
       <button class="danger-text" onclick="removePiece('${p.id}')">🗑</button>
     </div>
@@ -606,7 +953,7 @@ function savePiece() {
   } else {
     const nowIso = new Date().toISOString();
     data.pieces.push({
-      id: uid(), title, composer, notes, status, history: [],
+      id: uid(), title, composer, notes, status, sheet: null, history: [],
       wipSince: status === "wip" ? nowIso : null,
       perfectedSince: status === "perfected" ? nowIso : null
     });
@@ -620,7 +967,8 @@ function removePiece(id) {
   const p = data.pieces.find(x => x.id === id);
   if (p && confirm(`Remove "${p.title}" and its play history?`)) {
     data.pieces = data.pieces.filter(x => x.id !== id);
-    save(); render(); toast("Removed.");
+    delete wipRatings[id];
+    save(); savePendingSession(); render(); toast("Removed.");
   }
 }
 function markPerfected(id) {
@@ -630,14 +978,15 @@ function markPerfected(id) {
   p.status = "perfected";
   p.perfectedSince = new Date().toISOString();
   delete wipRatings[id];
-  save(); render();
+  if (!Object.keys(wipRatings).length) wipOrderFrozen = null;
+  save(); savePendingSession(); render();
   toast(`🎓 "${p.title}" perfected! ${last ? "Final rating: " + stars(last.rating) : ""}`);
 }
 function markWip(id) {
   const p = data.pieces.find(x => x.id === id);
   if (!p) return;
   p.status = "wip";
-  p.wipSince = new Date().toISOString(); // tenure restarts
+  p.wipSince = new Date().toISOString();
   save(); render(); toast(`"${p.title}" sent back to practice — clock restarted.`);
 }
 
@@ -646,7 +995,7 @@ function renderSettings() {
   document.getElementById("app").innerHTML = `
     <div class="card settings-block">
       <h3>Google Drive sync</h3>
-      <p class="muted">Your repertoire is stored as a hidden JSON file in your own Drive (appDataFolder).</p>
+      <p class="muted">Repertoire and sheet PDFs are stored as hidden files in your own Drive (appDataFolder).</p>
       <label>OAuth Client ID</label>
       <input type="text" id="sClientId" placeholder="xxxxxxxx.apps.googleusercontent.com" value="${escAttr(settings.clientId)}">
       <div class="sync-state">${signedIn()
@@ -695,7 +1044,7 @@ function renderSettings() {
         <button class="ghost" onclick="document.getElementById('importFile').click()">Import JSON</button>
         <input type="file" id="importFile" accept=".json" class="hidden" onchange="importJson(event)">
       </div>
-      <p class="muted" style="margin-top:8px">Useful as a backup even with Drive sync enabled.</p>
+      <p class="muted" style="margin-top:8px">Note: the JSON backup contains your list and history, not the sheet PDFs (those live only in Drive).</p>
     </div>`;
 }
 
@@ -751,7 +1100,32 @@ function render() {
 
 load();
 render();
+if (Object.keys(wipRatings).length || currentPick)
+  toast("Recovered your in-progress session ✓");
 trySignInSilently();
+
+/* ---------- PWA: manifest + service worker (full offline) ---------- */
+(function installPwa() {
+  const icon = "data:image/svg+xml," + encodeURIComponent(
+    `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' fill='#000'/><text x='256' y='370' font-size='300' text-anchor='middle'>\u{1F3B9}</text></svg>`);
+  const manifest = {
+    name: "Piano Repertoire Keeper",
+    short_name: "PianoKeeper",
+    start_url: "./",
+    scope: "./",
+    display: "standalone",
+    background_color: "#000000",
+    theme_color: "#000000",
+    icons: [{ src: icon, sizes: "512x512", type: "image/svg+xml", purpose: "any" }]
+  };
+  const link = document.createElement("link");
+  link.rel = "manifest";
+  link.href = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: "application/manifest+json" }));
+  document.head.appendChild(link);
+  if ("serviceWorker" in navigator && location.protocol === "https:") {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  }
+})();
 </script>
 </body>
 </html>
