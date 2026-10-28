@@ -236,7 +236,7 @@ function fmtDays(d) {
   if (d === 1) return "yesterday";
   return d + " days ago";
 }
-function fmtSessionDays(s) { return s?.ts ? fmtDays(daysSinceMs(sessionTs(s))) : fmtDays(daysSince(s?.date)); }
+function fmtSessionDays(s) { return s ? fmtDays(daysSinceMs(sessionTs(s))) : "never played"; }
 function fmtDateTime(s) {
   const d = new Date(sessionTs(s));
   const sameDay = new Date().toDateString() === d.toDateString();
