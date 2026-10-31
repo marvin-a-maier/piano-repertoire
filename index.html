@@ -556,10 +556,10 @@ window.addEventListener("keydown", (e) => {
   if (!sheet) return;
   const k = e.key || "";
   const c = e.code || "";
-  const isNext = ["ArrowRight", "PageDown", "MediaTrackNext", "Enter", "NumpadEnter", " "].includes(k) ||
-                ["ArrowRight", "PageDown"].includes(c);
-  const isPrev = ["ArrowLeft", "PageUp", "MediaTrackPrevious", "Backspace"].includes(k) ||
-                ["ArrowLeft", "PageUp"].includes(c);
+  const isNext = ["ArrowRight", "ArrowDown", "PageDown", "MediaTrackNext", "Enter", "NumpadEnter", " "].includes(k) ||
+                ["ArrowRight", "ArrowDown", "PageDown"].includes(c);
+  const isPrev = ["ArrowLeft", "ArrowUp", "PageUp", "MediaTrackPrevious", "Backspace"].includes(k) ||
+                ["ArrowLeft", "ArrowUp", "PageUp"].includes(c);
   if (isNext) { e.preventDefault(); sheetNav(1); }
   else if (isPrev) { e.preventDefault(); sheetNav(-1); }
   else if (k.length > 0 && !["Shift", "Control", "Alt", "Meta", "CapsLock", "Tab", "Escape"].includes(k)) {
