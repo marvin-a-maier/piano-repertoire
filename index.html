@@ -550,15 +550,22 @@ async function openSheet(pieceId) {
 }
 
 /* Global page-turn input: tap zones, swipe, and AirTurn Duo pedals
-   (HID keyboard: PageUp/PageDown, arrows, or media-track keys depending on mode) */
+   (HID keyboard: PageUp/PageDown, arrows, Space/Enter, or media-track keys
+   depending on the pedal's mode) */
 window.addEventListener("keydown", (e) => {
   if (!sheet) return;
   const k = e.key || "";
   const c = e.code || "";
-  const isNext = ["ArrowRight", "PageDown", "MediaTrackNext"].includes(k) || ["ArrowRight", "PageDown"].includes(c);
-  const isPrev = ["ArrowLeft", "PageUp", "MediaTrackPrevious"].includes(k) || ["ArrowLeft", "PageUp"].includes(c);
+  const isNext = ["ArrowRight", "PageDown", "MediaTrackNext", "Enter", "NumpadEnter", " "].includes(k) ||
+                ["ArrowRight", "PageDown"].includes(c);
+  const isPrev = ["ArrowLeft", "PageUp", "MediaTrackPrevious", "Backspace"].includes(k) ||
+                ["ArrowLeft", "PageUp"].includes(c);
   if (isNext) { e.preventDefault(); sheetNav(1); }
   else if (isPrev) { e.preventDefault(); sheetNav(-1); }
+  else if (k.length > 0 && !["Shift", "Control", "Alt", "Meta", "CapsLock", "Tab", "Escape"].includes(k)) {
+    // diagnostic: reveal unrecognized pedal keys so they can be added
+    toast(`Pedal key received: "${k}" (${c || "—"}) — report this to get it mapped`);
+  }
 });
 
 function renderSheetOverlay() {
@@ -597,6 +604,8 @@ function renderSheetOverlay() {
   }
   const p = data.pieces.find(x => x.id === sheet.pieceId);
   ov.style.display = "flex";
+  ov.tabIndex = -1;
+  ov.focus();   // ensure key events reach the app on all mobile browsers
   document.getElementById("sheetTitle").textContent = p ? p.title : "";
   drawSheetPage();
 }
